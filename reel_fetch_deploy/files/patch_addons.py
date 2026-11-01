@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import ast
 import re
 import shutil
@@ -112,6 +113,11 @@ def patch(path: Path, dry_run: bool = False) -> int:
 
     backup = path.with_suffix(path.suffix + f".bak-reel-{time.strftime('%Y%m%d-%H%M%S')}")
     shutil.copy2(path, backup)
+    st = path.stat()
+    try:
+        os.chown(backup, st.st_uid, st.st_gid)  # бэкап с тем же владельцем, что и оригинал
+    except OSError:
+        pass
     print(f"BACKUP: {backup}")
     path.write_text(patched, encoding="utf-8")
     try:

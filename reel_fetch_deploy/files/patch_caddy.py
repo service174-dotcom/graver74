@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import sys
@@ -156,6 +157,11 @@ def main() -> int:
 
     backup = path.with_name(path.name + f".bak-reel-{time.strftime('%Y%m%d-%H%M%S')}")
     shutil.copy2(path, backup)
+    st = path.stat()
+    try:
+        os.chown(backup, st.st_uid, st.st_gid)  # бэкап с тем же владельцем, что и оригинал
+    except OSError:
+        pass
     print(f"BACKUP: {backup}")
     path.write_text(patched, encoding="utf-8")
     print("OK: Caddyfile обновлён (валидация — отдельным шагом)")

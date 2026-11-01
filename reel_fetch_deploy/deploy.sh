@@ -60,7 +60,12 @@ if [ "$MODE" = revert ]; then
   newest_backup() { ls -1t $1 2>/dev/null | head -1 || true; }
   for target in "$CONNECTOR_DIR/addons_bridge.py" "$CADDYFILE"; do
     bak="$(newest_backup "${target}.bak-reel-*")"
-    if [ -n "$bak" ]; then cp -a "$bak" "$target"; ok "восстановлен $(basename "$target") из $(basename "$bak")"; else warn "бэкап для $target не найден"; fi
+    if [ -n "$bak" ]; then
+      own="$(stat -c '%u:%g' "$target" 2>/dev/null || stat -c '%u:%g' "$bak")"
+      mode="$(stat -c '%a' "$target" 2>/dev/null || stat -c '%a' "$bak")"
+      cp -a "$bak" "$target" && chown "$own" "$target" && chmod "$mode" "$target"   # бэкап мог быть root-овым
+      ok "восстановлен $(basename "$target") из $(basename "$bak") (владелец $(stat -c '%U:%G' "$target"))"
+    else warn "бэкап для $target не найден"; fi
   done
   rm -f "$CONNECTOR_DIR/reel_fetch.py" "$CONNECTOR_DIR/reel_sidecar.py"
   ok "файлы модуля удалены"
