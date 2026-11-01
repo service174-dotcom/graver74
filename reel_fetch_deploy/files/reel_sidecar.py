@@ -12,8 +12,11 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
+import mimetypes
 import os
+import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -45,9 +48,15 @@ def _load_api_key() -> str:
 
 API_KEY = _load_api_key()
 
+# Не зависим от /etc/mime.types на роутере.
+_MEDIA_TYPES = {".mp4": "video/mp4", ".m4a": "audio/mp4", ".webm": "video/webm", ".mkv": "video/x-matroska",
+                ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg", ".opus": "audio/ogg",
+                ".txt": "text/plain; charset=utf-8", ".json": "application/json", ".srt": "text/plain; charset=utf-8",
+                ".vtt": "text/vtt; charset=utf-8", ".jpg": "image/jpeg", ".webp": "image/webp"}
+
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "reel-sidecar/1.0"
+    server_version = "reel-sidecar/1.1"
 
     def _send(self, code: int, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -62,7 +71,70 @@ class Handler(BaseHTTPRequestHandler):
             return False
         given = (self.headers.get("X-API-Key") or self.headers.get("x-api-key")
                  or self.headers.get("Authorization", "").removeprefix("Bearer ").strip())
-        return given == API_KEY
+        return hmac.compare_digest(given.encode("utf-8"), API_KEY.encode("utf-8"))
+
+    # ---------------------------------------------------------------- /media
+    # Файлы отдаёт сам сайдкар (он работает под владельцем каталога), а не
+    # file_server Caddy: Caddy не нужен доступ к каталогу 750, нет листинга.
+    _MEDIA_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,200}$")
+
+    def _media(self, name: str, head: bool) -> None:
+        if not self._MEDIA_NAME.match(name) or ".." in name:
+            return self._send(404, {"ok": False, "error": "not found"})
+        base = reel_fetch.MEDIA_DIR.resolve()
+        path = (base / name).resolve()
+        if path.parent != base or not path.is_file():
+            return self._send(404, {"ok": False, "error": "not found"})
+        size = path.stat().st_size
+        start, end, status = 0, size - 1, 200
+        rng = self.headers.get("Range", "")
+        match = re.fullmatch(r"bytes=(\d*)-(\d*)", rng.strip()) if rng else None
+        if match and size > 0 and (match.group(1) or match.group(2)):
+            if match.group(1):
+                start = int(match.group(1))
+                end = min(int(match.group(2)), size - 1) if match.group(2) else size - 1
+            else:
+                start = max(size - int(match.group(2)), 0)
+            if start > end or start >= size:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return None
+            status = 206
+        ctype = (_MEDIA_TYPES.get(path.suffix.lower()) or mimetypes.guess_type(path.name)[0]
+                 or "application/octet-stream")
+        length = max(end - start + 1, 0)
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "private, max-age=3600")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        if head or length == 0:
+            return None
+        with path.open("rb") as fh:
+            fh.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = fh.read(min(256 * 1024, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+        return None
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/media/"):
+            return self._media(parsed.path[len("/media/"):], head=True)
+        self.send_response(405)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return None
 
     def _params(self, query: dict) -> dict:
         params: dict = {}
@@ -88,6 +160,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/media/"):
+            return self._media(parsed.path[len("/media/"):], head=False)
         if parsed.path in ("/health", "/reel/health"):
             return self._send(200, {"ok": True, "module": "reel_sidecar", "auth_required": bool(API_KEY),
                                     "reel": reel_fetch.health()})

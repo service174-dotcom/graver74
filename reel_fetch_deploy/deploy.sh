@@ -37,6 +37,9 @@ for arg in "$@"; do
   esac
 done
 
+# Запуск от владельца приложения (не от root): файлы в media/ и lock не должны стать root-овыми.
+as_owner() { if command -v runuser >/dev/null 2>&1; then runuser -u "$OWNER" -- "$@"; else sudo -n -u "$OWNER" -- "$@"; fi; }
+
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 ok()   { printf '   \033[32mOK\033[0m %s\n' "$*"; }
 warn() { printf '   \033[33mWARN\033[0m %s\n' "$*"; }
@@ -97,15 +100,21 @@ if [ "$MODE" = check ]; then
 fi
 
 mkdir -p "$BACKUP_DIR" "$MEDIA_DIR"
-chown "$OWNER:$OWNER" "$MEDIA_DIR" 2>/dev/null || true
+chown -R "$OWNER:$OWNER" "$MEDIA_DIR" 2>/dev/null || true   # в т.ч. lock/файлы от прежних запусков от root
 chmod 750 "$MEDIA_DIR"
 ok "каталог медиа: $MEDIA_DIR"
 
 # ------------------------------------------------------------------ зависимости
 say "2/8 Зависимости в venv"
+VENV_DIR="$(dirname "$(dirname "$VENV_PY")")"
+VENV_OWNER="$(stat -c %U "$VENV_DIR" 2>/dev/null || echo root)"
 "$VENV_PY" -m pip install -q --upgrade yt-dlp && ok "yt-dlp: $($VENV_PY -c 'import yt_dlp;print(yt_dlp.version.__version__)')" || warn "yt-dlp не обновился"
 if [ "$WITH_WHISPER" = 1 ]; then
   if "$VENV_PY" -m pip install -q faster-whisper; then ok "faster-whisper установлен (модель скачается при первом транскрипте)"; else warn "faster-whisper не установился"; fi
+fi
+# pip работал от root: вернуть владельца venv, если он был не root (ловушка №5 из ТЗ)
+if [ "$VENV_OWNER" != root ] && [ -d "$VENV_DIR/bin" ]; then
+  chown -R "$VENV_OWNER:$VENV_OWNER" "$VENV_DIR" && ok "владелец venv восстановлен: $VENV_OWNER"
 fi
 
 # ------------------------------------------------------------------ файлы модуля
@@ -118,7 +127,7 @@ for f in reel_fetch.py reel_sidecar.py; do
 done
 "$VENV_PY" -m py_compile "$CONNECTOR_DIR/reel_fetch.py" "$CONNECTOR_DIR/reel_sidecar.py" || die "модуль не компилируется — дальше не идём"
 ok "py_compile пройден"
-REEL_MEDIA_DIR="$MEDIA_DIR" "$VENV_PY" -c "import sys;sys.path.insert(0,'$CONNECTOR_DIR');import reel_fetch;h=reel_fetch.health();print('   health ok=%s yt_dlp=%s ffmpeg=%s media=%s asr=%s' % (h['ok'],h['yt_dlp'],bool(h['ffmpeg']),h['media_writable'],h['asr']))" \
+as_owner env REEL_MEDIA_DIR="$MEDIA_DIR" "$VENV_PY" -c "import sys;sys.path.insert(0,'$CONNECTOR_DIR');import reel_fetch;h=reel_fetch.health();print('   health ok=%s yt_dlp=%s ffmpeg=%s media=%s asr=%s' % (h['ok'],h['yt_dlp'],bool(h['ffmpeg']),h['media_writable'],h['asr']))" \
   || die "reel_fetch не импортируется в venv"
 ok "импорт и health() работают"
 
@@ -249,31 +258,39 @@ else
 fi
 
 if [ -n "$SMOKE_URL" ]; then
-  say "Живая проверка на ролике"
-  out="$("$VENV_PY" - "$SMOKE_URL" "$CONNECTOR_DIR" <<'PY'
-import json, sys
-sys.path.insert(0, sys.argv[2])
-import reel_fetch
-try:
-    print(json.dumps(reel_fetch.run_action("fetch", url=sys.argv[1]), ensure_ascii=False))
-except Exception as exc:
-    print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
-PY
-)"
-  echo "$out" | head -c 1200; echo
-  FURL="$(printf '%s' "$out" | "$VENV_PY" -c "import json,sys;d=json.load(sys.stdin);print(d.get('file_url','') if d.get('ok') else '')")"
-  if [ -n "$FURL" ]; then
-    code="$(curl -s -o /dev/null -w '%{http_code}' -m 15 -I "$FURL" || true)"
-    [ "$code" = "200" ] && ok "публичный файл доступен: $FURL" || warn "публичный URL: HTTP $code ($FURL)"
+  say "Живая проверка на ролике (через сервис: uid $OWNER, его DNS и egress)"
+  if [ -z "$KEY" ]; then
+    warn "нет API-ключа — смоук через сайдкар невозможен"
   else
-    warn "скачивание не удалось — см. вывод выше"
+    ENC_URL="$("$VENV_PY" -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$SMOKE_URL")"
+    out="$(curl -s -m 600 -H "X-API-Key: $KEY" "http://127.0.0.1:$SIDECAR_PORT/reel?action=fetch&transcribe=1&url=$ENC_URL" || true)"
+    [ -n "$out" ] || out='{"ok": false, "error": "сайдкар не ответил"}'
+    echo "$out" | head -c 1500; echo
+    FURL="$(printf '%s' "$out" | "$VENV_PY" -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get("file_url", "") if d.get("ok") else "")
+except Exception:
+    print("")')"
+    if [ -n "$FURL" ]; then
+      NAME="${FURL##*/}"
+      code="$(curl -s -o /dev/null -w '%{http_code}' -m 15 -I "http://127.0.0.1:$SIDECAR_PORT/media/$NAME" || true)"
+      [ "$code" = "200" ] && ok "сайдкар отдаёт файл: /media/$NAME" || warn "сайдкар /media: HTTP $code"
+      code="$(curl -s -o /dev/null -w '%{http_code}' -m 15 -I "$FURL" || true)"
+      [ "$code" = "200" ] && ok "публичный файл доступен: $FURL" || warn "публичный URL с роутера: HTTP $code ($FURL) — проверьте снаружи, hairpin через Xiaomi может не работать"
+    else
+      warn "скачивание не удалось — см. вывод выше (429 → подождать 10–15 мин, повторить один раз)"
+    fi
   fi
 fi
+
+# Страховка: всё в media/ принадлежит владельцу сервиса (в т.ч. lock от прежних запусков от root)
+chown -R "$OWNER:$OWNER" "$MEDIA_DIR" 2>/dev/null || true
 
 echo
 echo "Как пользоваться:"
 echo "  REST : curl -H \"X-API-Key: \$KEY\" 'https://$DOMAIN/reel?action=fetch&url=<REEL_URL>&transcribe=1'"
 echo "  MCP  : addons_call(module=\"reel_fetch\", action=\"fetch\", params={\"url\":\"<REEL_URL>\",\"transcribe\":true})"
-echo "  Файлы: https://$DOMAIN/media/<имя>.mp4"
+echo "  Файлы: https://$DOMAIN/media/<имя>.mp4   (отдаёт сайдкар, без листинга каталога)"
 echo "Откат:  sudo bash $HERE/deploy.sh --revert"
 echo "Бэкапы этого запуска: $BACKUP_DIR"
