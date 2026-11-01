@@ -477,3 +477,15 @@ def handle(action: str, params: dict | None = None, **extra: object) -> dict:
 
 def handle_http(action: str, params: dict | None = None, **extra: object) -> dict:
     return handle(action, params, **extra)
+
+
+def actions() -> list[str]:
+    return sorted(ACTIONS)
+
+
+def dispatch(action: str, params: dict | None = None) -> dict:
+    """Точка входа addons_bridge (addons_call в MCP): dispatch(action, params)."""
+    try:
+        return handle(action, params)
+    except ReelError as exc:
+        return {"ok": False, "module": MODULE, "action": action, "error": str(exc)}

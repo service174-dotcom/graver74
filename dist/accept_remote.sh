@@ -113,14 +113,14 @@ st="$(stat -c '%U:%G %a %n' "$APP_DIR/src/connector/addons_bridge.py" "$APP_DIR/
 echo "$st" > perms.txt
 res 11 "права auggievpn:auggievpn" "$(echo "$st" | grep -vq '^auggievpn:auggievpn' && echo FAIL || echo OK)" "$st"
 
-# 12 bridge/MCP
-s12=OK; f12=""
-for pair in social-connector-bridge:8787 social-connector-mcp-http:8788; do
-  u="${pair%%:*}"; p="${pair##*:}"
-  a="$(systemctl is-active "$u")"; y="$(code -H "X-API-Key: $K" "http://127.0.0.1:$p/health")"; n="$(code "http://127.0.0.1:$p/health")"
-  f12="$f12 $u=$a key=$y nokey=$n;"
-  [ "$a" = active ] && [ "$y" = 200 ] && [ "$n" = 401 ] || s12=FAIL
-done
+# 12 bridge/MCP: bridge — /health с ключом 200 / без 401; у mcp-http нет /health — POST /mcp без ключа → 401
+s12=OK
+ab="$(systemctl is-active social-connector-bridge)"; y="$(code -H "X-API-Key: $K" http://127.0.0.1:8787/health)"; n="$(code http://127.0.0.1:8787/health)"
+am="$(systemctl is-active social-connector-mcp-http)"
+m="$(code -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' http://127.0.0.1:8788/mcp)"
+f12="bridge=$ab key=$y nokey=$n; mcp-http=$am POST /mcp без ключа=$m"
+[ "$ab" = active ] && [ "$y" = 200 ] && [ "$n" = 401 ] && [ "$am" = active ] && [ "$m" = 401 ] || s12=FAIL
 res 12 "bridge/MCP после работ" "$s12" "$f12"
 
 # статусы юнитов, список бэкапов

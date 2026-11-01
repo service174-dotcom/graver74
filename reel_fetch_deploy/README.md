@@ -113,3 +113,14 @@ sudo bash deploy.sh --revert
 распаковка, `--check`, место, установка со смоуком, права, vosk при пустом транскрипте,
 12 проверок приёмки, `curl -I` публичного файла снаружи, отчёт `REPORT-<UTC>.md` (на ноутбук
 и на роутер) и `evidence-<UTC>/`. Ключ маскируется во всех файлах.
+
+## Изменения после развёртывания на vpn-router-01 (2026-11-01)
+
+9. `reel_fetch.dispatch(action, params)` и `actions()` — точка входа, которую ждёт
+   `addons_bridge` (без неё `addons_call` отвечал «exposes neither dispatch() nor action 'list'»).
+10. Приёмка п.12: у `social-connector-mcp-http` нет `/health` — проверяется `POST /mcp`
+    без ключа → 401.
+11. `.gitattributes`: `*.sh`/`*.py` всегда LF (с CRLF после checkout на Windows скрипты
+    падали на роутере).
+12. Известное: `alphacephei.com` с роутера недоступен — модель vosk скачивается на ноутбук и
+    кладётся `scp` в `/opt/social_connector/models/vosk-ru` (владелец `auggievpn`).

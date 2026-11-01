@@ -14,7 +14,7 @@ KEY_SSH="$HOME/.ssh/hackerai_router"
 SSH=(ssh -i "$KEY_SSH" -o BatchMode=yes -o ConnectTimeout=10 "$HOST")
 SCP=(scp -q -i "$KEY_SSH" -o BatchMode=yes -o ConnectTimeout=10)
 TAR=reel_fetch_deploy_20261101b.tar.gz
-SHA=78aeed244db8ad3fb1fd991d929c47e1bcb1a60d8d7fd7fb532a98426424971b
+SHA=7661f5527d55ec340275919d4044746cd971670d620a184b5eb816f94ceeb99f
 RDIR=/opt/social_connector/tools/reel_fetch_20261101
 REEL_URL="${REEL_URL:-https://www.instagram.com/reel/Dc_yQ6LoA1f/}"
 UTC="$(date -u +%Y%m%dT%H%M%SZ)"
